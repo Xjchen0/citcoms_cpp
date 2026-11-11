@@ -902,6 +902,38 @@ So, this bug won't manifest itself. But in other version of CitcomS, it will.
 by Tan2 7/21, 2003
 ================================================ */
 
+/* Helper functions to maintain persistent communication buffers and avoid per-iteration malloc/free,
+   which invalidates InfiniBand UCX memory registration cache (RCache) */
+static inline void ensure_buffer_capacity_d(double **buf, size_t *cur_cap, size_t needed_bytes)
+{
+    if (needed_bytes > *cur_cap) {
+        if (*buf) {
+            free(*buf);
+        }
+        *cur_cap = (needed_bytes > 0) ? (needed_bytes * 2) : 1024;
+        *buf = (double*)malloc(*cur_cap);
+        if (*buf == NULL) {
+            fprintf(stderr, "Out of memory in ensure_buffer_capacity_d: %zu bytes requested\n", *cur_cap);
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+    }
+}
+
+static inline void ensure_buffer_capacity_f(float **buf, size_t *cur_cap, size_t needed_bytes)
+{
+    if (needed_bytes > *cur_cap) {
+        if (*buf) {
+            free(*buf);
+        }
+        *cur_cap = (needed_bytes > 0) ? (needed_bytes * 2) : 1024;
+        *buf = (float*)malloc(*cur_cap);
+        if (*buf == NULL) {
+            fprintf(stderr, "Out of memory in ensure_buffer_capacity_f: %zu bytes requested\n", *cur_cap);
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+    }
+}
+
 void full_exchange_id_d(E, U, lev)
  struct All_variables *E;
  double **U;
@@ -909,18 +941,29 @@ void full_exchange_id_d(E, U, lev)
  {
 
  int ii,j,jj,m,k,kk,t_cap,idb,msginfo[8];
- double *S[73],*R[73], *RV, *SV;
+ double *S[100],*R[100], *RV, *SV;
  int mid_recv, sizeofk;
 
  MPI_Status status[100];
  MPI_Status status1;
  MPI_Request request[100];
 
+ static double *buf_S[100] = {NULL};
+ static size_t cap_S[100] = {0};
+ static double *buf_R[100] = {NULL};
+ static size_t cap_R[100] = {0};
+ static double *buf_SV = NULL;
+ static size_t cap_SV = 0;
+ static double *buf_RV = NULL;
+ static size_t cap_RV = 0;
+
  for (m=1;m<=E->sphere.caps_per_proc;m++)    {
    for (k=1;k<=E->parallel.TNUM_PASS[lev][m];k++)  {
      sizeofk = (1+E->parallel.NUM_NEQ[lev][m].pass[k])*sizeof(double);
-     S[k]=(double *)malloc( sizeofk );
-     R[k]=(double *)malloc( sizeofk );
+     ensure_buffer_capacity_d(&buf_S[k], &cap_S[k], sizeofk);
+     ensure_buffer_capacity_d(&buf_R[k], &cap_R[k], sizeofk);
+     S[k] = buf_S[k];
+     R[k] = buf_R[k];
    }
  }
 
@@ -929,16 +972,32 @@ void full_exchange_id_d(E, U, lev)
    kk = (1+E->parallel.NUM_NEQz[lev].pass[k])*sizeof(double);
    sizeofk = max(sizeofk, kk);
  }
- RV=(double *)malloc( sizeofk );
- SV=(double *)malloc( sizeofk );
+ ensure_buffer_capacity_d(&buf_SV, &cap_SV, sizeofk);
+ ensure_buffer_capacity_d(&buf_RV, &cap_RV, sizeofk);
+ SV = buf_SV;
+ RV = buf_RV;
 
   idb=0;
+  /* 1. 先投递所有的非阻塞接收 (Post all Irecv first to eliminate RNR NACK) */
+  for (m=1;m<=E->sphere.caps_per_proc;m++)   {
+    for (k=1;k<=E->parallel.TNUM_PASS[lev][m];k++)   {
+      if (E->parallel.PROCESSOR[lev][m].pass[k] != E->parallel.me &&
+	  E->parallel.PROCESSOR[lev][m].pass[k] != -1) {
+         idb++;
+	 MPI_Irecv(R[k],E->parallel.NUM_NEQ[lev][m].pass[k], MPI_DOUBLE,
+		   E->parallel.PROCESSOR[lev][m].pass[k], 1,
+		   E->parallel.world, &request[idb-1]);
+      }
+    }
+  }
+
+  /* 2. 打包并投递非阻塞发送 (Pack and post all Isend) */
   for (m=1;m<=E->sphere.caps_per_proc;m++)   {
     for (k=1;k<=E->parallel.TNUM_PASS[lev][m];k++)     {
 
       for (j=1;j<=E->parallel.NUM_NEQ[lev][m].pass[k];j++) {
         S[k][j-1] = U[m][ E->parallel.EXCHANGE_ID[lev][m][j].pass[k] ];
-	}
+      }
 
       if (E->parallel.PROCESSOR[lev][m].pass[k] != E->parallel.me &&
 	  E->parallel.PROCESSOR[lev][m].pass[k] != -1) {
@@ -947,25 +1006,12 @@ void full_exchange_id_d(E, U, lev)
 		    E->parallel.PROCESSOR[lev][m].pass[k], 1,
 		    E->parallel.world, &request[idb-1]);
       }
-    }           /* for k */
-  }     /* for m */         /* finish sending */
-
-  for (m=1;m<=E->sphere.caps_per_proc;m++)   {
-    for (k=1;k<=E->parallel.TNUM_PASS[lev][m];k++)   {
-
-      if (E->parallel.PROCESSOR[lev][m].pass[k] != E->parallel.me &&
-	  E->parallel.PROCESSOR[lev][m].pass[k] != -1) {
-         idb++;
-	 MPI_Irecv(R[k],E->parallel.NUM_NEQ[lev][m].pass[k], MPI_DOUBLE,
-		   E->parallel.PROCESSOR[lev][m].pass[k], 1,
-		   E->parallel.world, &request[idb-1]);
-      }
       else {
 	for (j=1;j<=E->parallel.NUM_NEQ[lev][m].pass[k];j++)
            U[m][ E->parallel.EXCHANGE_ID[lev][m][j].pass[k] ] += S[k][j-1];
       }
-    }      /* for k */
-  }     /* for m */         /* finish receiving */
+    }           /* for k */
+  }     /* for m */
 
   MPI_Waitall(idb,request,status);
 
@@ -1002,16 +1048,6 @@ void full_exchange_id_d(E, U, lev)
         U[m][ E->parallel.EXCHANGE_ID[lev][m][j].pass[kk] ] += RV[jj++];
   }
 
- for (m=1;m<=E->sphere.caps_per_proc;m++)    {
-   for (k=1;k<=E->parallel.TNUM_PASS[lev][m];k++)  {
-     free((void*) S[k]);
-     free((void*) R[k]);
-   }
- }
-
- free((void*) SV);
- free((void*) RV);
-
  return;
  }
 
@@ -1025,20 +1061,31 @@ static void exchange_node_d(E, U, lev)
  {
 
  int ii,j,jj,m,k,kk,t_cap,idb,msginfo[8];
- double *S[73],*R[73], *RV, *SV;
+ double *S[100],*R[100], *RV, *SV;
  int mid_recv, sizeofk;
 
  MPI_Status status[100];
  MPI_Status status1;
  MPI_Request request[100];
 
+ static double *buf_S[100] = {NULL};
+ static size_t cap_S[100] = {0};
+ static double *buf_R[100] = {NULL};
+ static size_t cap_R[100] = {0};
+ static double *buf_SV = NULL;
+ static size_t cap_SV = 0;
+ static double *buf_RV = NULL;
+ static size_t cap_RV = 0;
+
  kk=0;
  for (m=1;m<=E->sphere.caps_per_proc;m++)    {
    for (k=1;k<=E->parallel.TNUM_PASS[lev][m];k++)  {
      ++kk;
      sizeofk = (1+E->parallel.NUM_NODE[lev][m].pass[k])*sizeof(double);
-     S[kk]=(double *)malloc( sizeofk );
-     R[kk]=(double *)malloc( sizeofk );
+     ensure_buffer_capacity_d(&buf_S[kk], &cap_S[kk], sizeofk);
+     ensure_buffer_capacity_d(&buf_R[kk], &cap_R[kk], sizeofk);
+     S[kk] = buf_S[kk];
+     R[kk] = buf_R[kk];
    }
  }
 
@@ -1047,11 +1094,27 @@ static void exchange_node_d(E, U, lev)
    sizeofk = (1+E->parallel.NUM_NODEz[lev].pass[k])*sizeof(double);
    idb = max(idb,sizeofk);
  }
-
- RV=(double *)malloc( idb );
- SV=(double *)malloc( idb );
+ ensure_buffer_capacity_d(&buf_SV, &cap_SV, idb);
+ ensure_buffer_capacity_d(&buf_RV, &cap_RV, idb);
+ SV = buf_SV;
+ RV = buf_RV;
 
   idb=0;
+  /* 1. 先投递所有的非阻塞接收 (Post all Irecv first) */
+  for (m=1;m<=E->sphere.caps_per_proc;m++)   {
+    for (k=1;k<=E->parallel.TNUM_PASS[lev][m];k++)   {
+      kk=k;
+      if (E->parallel.PROCESSOR[lev][m].pass[k]!=E->parallel.me)  {
+	if (E->parallel.PROCESSOR[lev][m].pass[k]!=-1) {
+         idb++;
+         MPI_Irecv(R[kk],E->parallel.NUM_NODE[lev][m].pass[k],MPI_DOUBLE,
+         E->parallel.PROCESSOR[lev][m].pass[k],1,E->parallel.world,&request[idb-1]);
+         }
+      }
+    }
+  }
+
+  /* 2. 打包并投递非阻塞发送 (Pack and post all Isend) */
   for (m=1;m<=E->sphere.caps_per_proc;m++)   {
     for (k=1;k<=E->parallel.TNUM_PASS[lev][m];k++)     {
       kk=k;
@@ -1065,29 +1128,13 @@ static void exchange_node_d(E, U, lev)
         MPI_Isend(S[kk],E->parallel.NUM_NODE[lev][m].pass[k],MPI_DOUBLE,
              E->parallel.PROCESSOR[lev][m].pass[k],1,E->parallel.world,&request[idb-1]);
 	}
-         }
-      }           /* for k */
-    }     /* for m */         /* finish sending */
-
-  for (m=1;m<=E->sphere.caps_per_proc;m++)   {
-    for (k=1;k<=E->parallel.TNUM_PASS[lev][m];k++)   {
-      kk=k;
-
-      if (E->parallel.PROCESSOR[lev][m].pass[k]!=E->parallel.me)  {
-	if (E->parallel.PROCESSOR[lev][m].pass[k]!=-1) {
-         idb++;
-         MPI_Irecv(R[kk],E->parallel.NUM_NODE[lev][m].pass[k],MPI_DOUBLE,
-         E->parallel.PROCESSOR[lev][m].pass[k],1,E->parallel.world,&request[idb-1]);
-         }
       }
-
       else   {
-	kk=k;
          for (j=1;j<=E->parallel.NUM_NODE[lev][m].pass[k];j++)
            U[m][ E->parallel.EXCHANGE_NODE[lev][m][j].pass[k] ] += S[kk][j-1];
-         }
-      }      /* for k */
-    }     /* for m */         /* finish receiving */
+      }
+    }           /* for k */
+  }     /* for m */
 
   MPI_Waitall(idb,request,status);
 
@@ -1124,18 +1171,6 @@ static void exchange_node_d(E, U, lev)
         U[m][ E->parallel.EXCHANGE_NODE[lev][m][j].pass[kk] ] += RV[jj++];
     }
 
-  kk = 0;
- for (m=1;m<=E->sphere.caps_per_proc;m++)    {
-   for (k=1;k<=E->parallel.TNUM_PASS[lev][m];k++)  {
-     kk++;
-     free((void*) S[kk]);
-     free((void*) R[kk]);
-   }
- }
-
- free((void*) SV);
- free((void*) RV);
-
  return;
 }
 
@@ -1150,20 +1185,31 @@ static void exchange_node_f(E, U, lev)
 
  int ii,j,jj,m,k,kk,t_cap,idb,msginfo[8];
 
- float *S[73],*R[73], *RV, *SV;
+ float *S[100],*R[100], *RV, *SV;
  int mid_recv, sizeofk;
 
  MPI_Status status[100];
  MPI_Status status1;
  MPI_Request request[100];
 
+ static float *buf_S[100] = {NULL};
+ static size_t cap_S[100] = {0};
+ static float *buf_R[100] = {NULL};
+ static size_t cap_R[100] = {0};
+ static float *buf_SV = NULL;
+ static size_t cap_SV = 0;
+ static float *buf_RV = NULL;
+ static size_t cap_RV = 0;
+
  kk=0;
  for (m=1;m<=E->sphere.caps_per_proc;m++)    {
    for (k=1;k<=E->parallel.TNUM_PASS[lev][m];k++)  {
      ++kk;
      sizeofk = (1+E->parallel.NUM_NODE[lev][m].pass[k])*sizeof(float);
-     S[kk]=(float *)malloc( sizeofk );
-     R[kk]=(float *)malloc( sizeofk );
+     ensure_buffer_capacity_f(&buf_S[kk], &cap_S[kk], sizeofk);
+     ensure_buffer_capacity_f(&buf_R[kk], &cap_R[kk], sizeofk);
+     S[kk] = buf_S[kk];
+     R[kk] = buf_R[kk];
    }
  }
 
@@ -1172,11 +1218,27 @@ static void exchange_node_f(E, U, lev)
    sizeofk = (1+E->parallel.NUM_NODEz[lev].pass[k])*sizeof(float);
    idb = max(idb,sizeofk);
  }
-
- RV=(float *)malloc( idb );
- SV=(float *)malloc( idb );
+ ensure_buffer_capacity_f(&buf_SV, &cap_SV, idb);
+ ensure_buffer_capacity_f(&buf_RV, &cap_RV, idb);
+ SV = buf_SV;
+ RV = buf_RV;
 
   idb=0;
+  /* 1. 先投递所有的非阻塞接收 (Post all Irecv first) */
+  for (m=1;m<=E->sphere.caps_per_proc;m++)   {
+    for (k=1;k<=E->parallel.TNUM_PASS[lev][m];k++)   {
+      kk=k;
+      if (E->parallel.PROCESSOR[lev][m].pass[k]!=E->parallel.me)  {
+	if (E->parallel.PROCESSOR[lev][m].pass[k]!=-1) {
+         idb++;
+         MPI_Irecv(R[kk],E->parallel.NUM_NODE[lev][m].pass[k],MPI_FLOAT,
+         E->parallel.PROCESSOR[lev][m].pass[k],1,E->parallel.world,&request[idb-1]);
+         }
+      }
+    }
+  }
+
+  /* 2. 打包并投递非阻塞发送 (Pack and post all Isend) */
   for (m=1;m<=E->sphere.caps_per_proc;m++)   {
     for (k=1;k<=E->parallel.TNUM_PASS[lev][m];k++)     {
       kk=k;
@@ -1190,29 +1252,13 @@ static void exchange_node_f(E, U, lev)
         MPI_Isend(S[kk],E->parallel.NUM_NODE[lev][m].pass[k],MPI_FLOAT,
              E->parallel.PROCESSOR[lev][m].pass[k],1,E->parallel.world,&request[idb-1]);
 	}
-         }
-      }           /* for k */
-    }     /* for m */         /* finish sending */
-
-  for (m=1;m<=E->sphere.caps_per_proc;m++)   {
-    for (k=1;k<=E->parallel.TNUM_PASS[lev][m];k++)   {
-      kk=k;
-
-      if (E->parallel.PROCESSOR[lev][m].pass[k]!=E->parallel.me)  {
-	if (E->parallel.PROCESSOR[lev][m].pass[k]!=-1) {
-         idb++;
-         MPI_Irecv(R[kk],E->parallel.NUM_NODE[lev][m].pass[k],MPI_FLOAT,
-         E->parallel.PROCESSOR[lev][m].pass[k],1,E->parallel.world,&request[idb-1]);
-         }
       }
-
       else   {
-	kk=k;
          for (j=1;j<=E->parallel.NUM_NODE[lev][m].pass[k];j++)
            U[m][ E->parallel.EXCHANGE_NODE[lev][m][j].pass[k] ] += S[kk][j-1];
-         }
-      }      /* for k */
-    }     /* for m */         /* finish receiving */
+      }
+    }           /* for k */
+  }     /* for m */
 
   MPI_Waitall(idb,request,status);
 
@@ -1249,18 +1295,6 @@ static void exchange_node_f(E, U, lev)
         U[m][ E->parallel.EXCHANGE_NODE[lev][m][j].pass[kk] ] += RV[jj++];
     }
 
-  kk = 0;
- for (m=1;m<=E->sphere.caps_per_proc;m++)    {
-   for (k=1;k<=E->parallel.TNUM_PASS[lev][m];k++)  {
-     kk++;
-     free((void*) S[kk]);
-     free((void*) R[kk]);
-   }
- }
-
- free((void*) SV);
- free((void*) RV);
-
  return;
  }
 /* ================================================ */
@@ -1271,25 +1305,46 @@ void full_exchange_snode_f(struct All_variables *E, float **U1,
  {
 
  int ii,j,k,m,kk,t_cap,idb,msginfo[8];
- float *S[73],*R[73];
+ float *S[100],*R[100];
  int mid_recv, sizeofk;
 
  MPI_Status status[100];
  MPI_Status status1;
  MPI_Request request[100];
 
+ static float *buf_S[100] = {NULL};
+ static size_t cap_S[100] = {0};
+ static float *buf_R[100] = {NULL};
+ static size_t cap_R[100] = {0};
+
    kk=0;
    for (m=1;m<=E->sphere.caps_per_proc;m++)    {
      for (k=1;k<=E->parallel.TNUM_PASS[E->mesh.levmax][m];k++)  {
        ++kk;
        sizeofk = (1+2*E->parallel.NUM_sNODE[E->mesh.levmax][m].pass[k])*sizeof(float);
-       S[kk]=(float *)malloc( sizeofk );
-       R[kk]=(float *)malloc( sizeofk );
-       }
+       ensure_buffer_capacity_f(&buf_S[kk], &cap_S[kk], sizeofk);
+       ensure_buffer_capacity_f(&buf_R[kk], &cap_R[kk], sizeofk);
+       S[kk] = buf_S[kk];
+       R[kk] = buf_R[kk];
      }
+   }
 
   idb=0;
-  /* sending */
+  /* 1. 先投递所有的非阻塞接收 (Post all Irecv first) */
+  for (m=1;m<=E->sphere.caps_per_proc;m++)   {
+    for (k=1;k<=E->parallel.TNUM_PASS[lev][m];k++)   {
+      kk=k;
+      if (E->parallel.PROCESSOR[lev][m].pass[k]!=E->parallel.me)  {
+	if (E->parallel.PROCESSOR[lev][m].pass[k]!=-1) {
+         idb ++;
+         MPI_Irecv(R[kk],2*E->parallel.NUM_sNODE[lev][m].pass[k],MPI_FLOAT,
+           E->parallel.PROCESSOR[lev][m].pass[k],1,E->parallel.world,&request[idb-1]);
+         }
+      }
+    }
+  }
+
+  /* 2. 打包并投递非阻塞发送 (Pack and post all Isend) */
   for (m=1;m<=E->sphere.caps_per_proc;m++)   {
     for (k=1;k<=E->parallel.TNUM_PASS[lev][m];k++)     {
       kk=k;
@@ -1299,7 +1354,7 @@ void full_exchange_snode_f(struct All_variables *E, float **U1,
         S[kk][j-1] = U1[m][ E->parallel.EXCHANGE_sNODE[lev][m][j].pass[k] ];
         S[kk][j-1+E->parallel.NUM_sNODE[lev][m].pass[k]]
                    = U2[m][ E->parallel.EXCHANGE_sNODE[lev][m][j].pass[k] ];
-        }
+      }
 
       if (E->parallel.PROCESSOR[lev][m].pass[k]!=E->parallel.me) {
 	if (E->parallel.PROCESSOR[lev][m].pass[k]!=-1) {
@@ -1308,33 +1363,15 @@ void full_exchange_snode_f(struct All_variables *E, float **U1,
              E->parallel.PROCESSOR[lev][m].pass[k],1,E->parallel.world,&request[idb-1]);
          }
       }
-      }           /* for k */
-    }     /* for m */         /* finish sending */
-
-  /* receiving */
-  for (m=1;m<=E->sphere.caps_per_proc;m++)   {
-    for (k=1;k<=E->parallel.TNUM_PASS[lev][m];k++)   {
-      kk=k;
-
-      if (E->parallel.PROCESSOR[lev][m].pass[k]!=E->parallel.me)  {
-	if (E->parallel.PROCESSOR[lev][m].pass[k]!=-1) {
-
-         idb ++;
-         MPI_Irecv(R[kk],2*E->parallel.NUM_sNODE[lev][m].pass[k],MPI_FLOAT,
-           E->parallel.PROCESSOR[lev][m].pass[k],1,E->parallel.world,&request[idb-1]);
-         }
-      }
-
       else   {
-	kk=k;
          for (j=1;j<=E->parallel.NUM_sNODE[lev][m].pass[k];j++)     {
            U1[m][ E->parallel.EXCHANGE_sNODE[lev][m][j].pass[k] ] += S[kk][j-1];
            U2[m][ E->parallel.EXCHANGE_sNODE[lev][m][j].pass[k] ] +=
                                S[kk][j-1+E->parallel.NUM_sNODE[lev][m].pass[k]];
-           }
          }
-      }      /* for k */
-    }     /* for m */         /* finish receiving */
+      }
+    }           /* for k */
+  }     /* for m */
 
   MPI_Waitall(idb,request,status);
 
@@ -1352,15 +1389,6 @@ void full_exchange_snode_f(struct All_variables *E, float **U1,
            }
 	}
       }
-  }
-
-  kk=0;
-  for (m=1;m<=E->sphere.caps_per_proc;m++)    {
-    for (k=1;k<=E->parallel.TNUM_PASS[E->mesh.levmax][m];k++)  {
-      ++kk;
-      free((void*) S[kk]);
-      free((void*) R[kk]);
-    }
   }
 
  return;

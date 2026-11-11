@@ -380,10 +380,10 @@ void full_lost_souls(struct All_variables *E)
     for (kk=1;kk<=num_ngb;kk++) {
         idestination_proc=E->parallel.PROCESSOR[lev][j].pass[kk];
 
-        MPI_Isend(&isend[j][kk],1,MPI_INT,idestination_proc,
+        MPI_Irecv(&ireceive[j][kk],1,MPI_INT,idestination_proc,
                   11,E->parallel.world,&request[idb++]);
 
-        MPI_Irecv(&ireceive[j][kk],1,MPI_INT,idestination_proc,
+        MPI_Isend(&isend[j][kk],1,MPI_INT,idestination_proc,
                   11,E->parallel.world,&request[idb++]);
 
     } /* end kk, number of neighbors */
@@ -443,14 +443,14 @@ void full_lost_souls(struct All_variables *E)
     for (kk=1;kk<=num_ngb;kk++) {
         idestination_proc=E->parallel.PROCESSOR[lev][j].pass[kk];
 
-        isize[j]=isend[j][kk]*E->trace.number_of_tracer_quantities;
-
-        MPI_Isend(send[j][kk],isize[j],MPI_DOUBLE,idestination_proc,
-                  11,E->parallel.world,&request[idb++]);
-
         isize[j]=ireceive[j][kk]*E->trace.number_of_tracer_quantities;
 
         MPI_Irecv(receive[j][kk],isize[j],MPI_DOUBLE,idestination_proc,
+                  11,E->parallel.world,&request[idb++]);
+
+        isize[j]=isend[j][kk]*E->trace.number_of_tracer_quantities;
+
+        MPI_Isend(send[j][kk],isize[j],MPI_DOUBLE,idestination_proc,
                   11,E->parallel.world,&request[idb++]);
 
     } /* end kk, number of neighbors */
@@ -601,10 +601,10 @@ void full_lost_souls(struct All_variables *E)
         for (kk=1;kk<=E->parallel.TNUM_PASSz[lev];kk++) {
 
             idestination_proc = E->parallel.PROCESSORz[lev].pass[kk];
-            MPI_Isend(&isend_z[j][kk],1,MPI_INT,idestination_proc,
+            MPI_Irecv(&ireceive_z[j][kk],1,MPI_INT,idestination_proc,
                       14,E->parallel.world,&request[idb++]);
 
-            MPI_Irecv(&ireceive_z[j][kk],1,MPI_INT,idestination_proc,
+            MPI_Isend(&isend_z[j][kk],1,MPI_INT,idestination_proc,
                       14,E->parallel.world,&request[idb++]);
 
         } /* end ivertical_neighbor */
@@ -646,14 +646,14 @@ void full_lost_souls(struct All_variables *E)
 
             idestination_proc = E->parallel.PROCESSORz[lev].pass[kk];
 
-            isize_send=isend_z[j][kk]*E->trace.number_of_tracer_quantities;
-
-            MPI_Isend(send_z[j][kk],isize_send,MPI_DOUBLE,idestination_proc,
-                      15,E->parallel.world,&request[idb++]);
-
             isize_receive=ireceive_z[j][kk]*E->trace.number_of_tracer_quantities;
 
             MPI_Irecv(receive_z[j][kk],isize_receive,MPI_DOUBLE,idestination_proc,
+                      15,E->parallel.world,&request[idb++]);
+
+            isize_send=isend_z[j][kk]*E->trace.number_of_tracer_quantities;
+
+            MPI_Isend(send_z[j][kk],isize_send,MPI_DOUBLE,idestination_proc,
                       15,E->parallel.world,&request[idb++]);
         }
 
