@@ -1,14 +1,15 @@
-# CitcomS C++17: High-Performance Mantle Convection Simulation
+# citcoms_cpp: Modern C++17 Mantle Convection Simulation Engine
 
+[![Version: 0.1.0](https://img.shields.io/badge/Version-v0.1.0-brightgreen.svg)](https://github.com/Xjchen0/citcoms_cpp/releases/tag/v0.1.0)
 [![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)](COPYING)
 [![C++17](https://img.shields.io/badge/Language-C%2B%2B17-blue.svg)](https://en.cppreference.com/w/cpp/17)
 [![CMake](https://img.shields.io/badge/Build-CMake%20%E2%89%A5%203.16-brightgreen.svg)](https://cmake.org)
 [![Compiler: GCC & LLVM/Clang](https://img.shields.io/badge/Compiler-GCC%20%7C%20LLVM%2FClang-orange.svg)](https://gcc.gnu.org)
 [![CitcomS Manual](https://img.shields.io/badge/docs-CitcomS%20Manual-green.svg)](https://github.com/geodynamics/citcoms/blob/master/doc/citcoms-manual.pdf)
 
-CitcomS is a high-performance finite element simulation system for thermochemical mantle convection within Earth's mantle in both **regional (1 cap)** and **global full spherical shell (12 caps)** geometries.
+**citcoms_cpp** is a modernized, high-performance finite element simulation engine for thermochemical mantle convection within Earth's mantle in both **regional (1 cap)** and **global full spherical shell (12 caps)** geometries.
 
-This branch (`citcoms_cpp`) represents a complete modernization to **ISO C++17**, standardizing all legacy C/K&R routines into modern, type-safe C++ with first-class support for modern **GCC (`g++`)** and **LLVM (`clang++`)** toolchains, a **CMake** build system, and **high-performance C++ post-processing** while strictly preserving 100% compatibility with all physics solvers, configurations, and input/output formats.
+This repository (`citcoms_cpp`) represents a complete architectural modernization to **ISO C++17**, standardizing all legacy C/K&R routines into modern, type-safe C++ with first-class support for modern **GCC (`g++`)** and **LLVM (`clang++`)** toolchains, a **CMake** build system, **hardware-optimized InfiniBand RDMA/UCX communications**, and **high-performance C++ post-processing** while strictly preserving 100% numerical and physical equivalence with all CitcomS physics solvers, configurations, and input/output formats.
 
 ---
 
@@ -58,6 +59,14 @@ This branch (`citcoms_cpp`) represents a complete modernization to **ISO C++17**
   - VTK PVD Collection (`.pvd`): Rank 0 continuously generates and updates `${data_file}.pvd` linking multi-block `.vtm` / `.pvts` files with physical geological ages (Myr).
   - HDF5 XDMF Indexing (`.xdmf`): Maps 12-cap curvilinear structured meshes (`3DSMesh`) and hyperslab slices to parallel HDF5 datasets, enabling direct native 3D visualization and animated time playback in ParaView.
   - Standalone tool `bin/citcoms_h5_to_xdmf.py` enables 1-second retroactive XDMF indexing of existing HDF5 runs.
+
+### 1.5 InfiniBand RDMA & UCX Hardware Communication Optimization
+* **Persistent Communication Buffer Pools**:
+  - Replaces per-iteration dynamic memory allocations (`malloc`/`free`) in core multigrid smoothers and nodal field exchanges (`full_exchange_id_d`, `exchange_node_d`, `exchange_node_f`, `full_exchange_snode_f`) with persistent, adaptive static communication buffers.
+  - Keeps communication virtual addresses stable throughout millions of time steps, preventing InfiniBand UCX Memory Registration Cache (RCache) desynchronization and eliminating hardware protection faults (`Transport retry count exceeded, synd 0x15`).
+* **Inverted Non-Blocking Communication Ordering**:
+  - Posts all non-blocking receives (`MPI_Irecv`) prior to packing and posting non-blocking sends (`MPI_Isend`) in domain boundary exchanges and tracer particle migration.
+  - Eliminates Receiver-Not-Ready (RNR NACK) packet drops, retry overhead, and communication deadlocks under high-core-count HPC scaling (hundreds to thousands of MPI ranks).
 
 ---
 
